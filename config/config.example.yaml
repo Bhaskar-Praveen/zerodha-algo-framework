@@ -1,0 +1,6 @@
+broker:
+  name: zerodha
+
+trading:
+  symbol: NIFTY
+  quantity: 1
