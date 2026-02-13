@@ -1,21 +1,29 @@
-system:
-  mode: "paper"   # paper | live
-
 trade:
   lot_size: 65
   lots: 5
 
 risk:
-  stop_loss_pct: 0.05
+  hard_sl_pct: 0.05
+  early_sl_pct: 0.03
   max_daily_loss: -3000
 
 features:
+  volume_filter:
+    enabled: true
+    spike_threshold: 1.5
+
   momentum_filter:
     enabled: true
     threshold: 0.5
 
-alerts:
-  telegram:
-    enabled: false
-    bot_token: ""
-    chat_id: ""
+  ema_separation:
+    enabled: true
+    threshold_pct: 0.25
+
+  correlation_filter:
+    enabled: true
+
+  extreme_move:
+    enabled: true
+    ema_threshold: 0.3
+    momentum_threshold: 0.7
