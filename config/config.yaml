@@ -1,0 +1,21 @@
+system:
+  mode: "paper"   # paper | live
+
+trade:
+  lot_size: 65
+  lots: 5
+
+risk:
+  stop_loss_pct: 0.05
+  max_daily_loss: -3000
+
+features:
+  momentum_filter:
+    enabled: true
+    threshold: 0.5
+
+alerts:
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""

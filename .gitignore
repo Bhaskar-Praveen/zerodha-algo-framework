@@ -1,3 +1,5 @@
-.env
+logs/
+data/
+state.json
 __pycache__/
-strategies/live/
+*.pyc
