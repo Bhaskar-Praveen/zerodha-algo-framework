@@ -1,3 +1,5 @@
+config_version: v4.1
+
 trade:
   lot_size: 65
   lots: 5
@@ -7,7 +9,7 @@ risk:
   early_sl_pct: 0.03
   max_daily_loss: -3000
 
-features:
+filters:
   volume_filter:
     enabled: true
     spike_threshold: 1.5

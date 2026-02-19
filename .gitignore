@@ -3,3 +3,6 @@ data/
 state.json
 __pycache__/
 *.pyc
+state
+*.log
+.config/

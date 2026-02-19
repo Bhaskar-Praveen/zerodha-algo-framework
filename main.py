@@ -1,200 +1,149 @@
-import time
-import datetime
-import sys
+from datetime import datetime
+import logging
+import threading
 
-from core.logging_setup import setup_logger
-from core.state_manager import load_state, save_state
-from core.trade_utils import get_quantity, get_stop_loss_pct
-from core.summary import append_trade, generate_eod_summary
-from core.version import BOT_VERSION
+# ------------------------------------------------------------
+# 1. LOAD YAML CONFIG
+# ------------------------------------------------------------
+from config.config_adapter import load_yaml_config
+load_yaml_config()
+
+# ------------------------------------------------------------
+# 2. VALIDATE CONFIG (NEW SAFE LAYER)
+# ------------------------------------------------------------
 from config.config_loader import CONFIG
-
-from broker.kite_client import get_kite
-from broker.execution import place_market_order
-from core.order_manager import wait_for_completion
-
-from strategies.smart_range import generate_signal
-
-
-# -----------------------------
-# INITIALIZATION
-# -----------------------------
-
-logger = setup_logger()
-logger.info(f"Starting Bot Version {BOT_VERSION}")
-
-state = load_state()
-
-# Initialize Kite
-# Replace with your real key/token source
-API_KEY = "YOUR_API_KEY"
-ACCESS_TOKEN = "YOUR_ACCESS_TOKEN"
-
-kite = get_kite(API_KEY, ACCESS_TOKEN)
-
-
-# -----------------------------
-# MAIN LOOP
-# -----------------------------
-
-def market_open():
-    now = datetime.datetime.now().time()
-    return now >= datetime.time(9, 15) and now <= datetime.time(15, 25)
-
-
-def is_eod():
-    now = datetime.datetime.now().time()
-    return now >= datetime.time(15, 25)
-
+from config.config_validator import validate_config
 
 try:
+    validate_config(CONFIG)
+    logging.info("✅ Config validation passed.")
+except Exception as e:
+    logging.error(str(e))
+    raise SystemExit(1)
+
+# ------------------------------------------------------------
+# 3. IMPORT LIVE ENGINE AFTER VALIDATION
+# ------------------------------------------------------------
+from live_engine import (
+    Config,
+    KiteAPIManager,
+    TradingStrategy,
+    get_next_expiry,
+    wait_until_market_open,
+    exit_if_market_closed,
+    load_state,
+    save_state
+)
+
+# ============================================================
+# MAIN ENTRY POINT
+# ============================================================
+
+def main():
+
+    logging.info("="*80)
+    logging.info("🚀 STARTING 4.7.5.1 LIVE ENGINE")
+    logging.info("="*80)
+
+    # --------------------------------------------------------
+    # 1. ACCESS TOKEN INPUT (LIVE MODE)
+    # --------------------------------------------------------
+    Config.ACCESS_TOKEN = input("🔑 Paste Zerodha Access Token: ").strip()
+
+    if not Config.ACCESS_TOKEN:
+        logging.error("❌ Access token missing.")
+        return
+
+    # --------------------------------------------------------
+    # 2. WAIT FOR MARKET OPEN
+    # --------------------------------------------------------
+    wait_until_market_open()
+
+    # --------------------------------------------------------
+    # 3. INITIALIZE KITE API
+    # --------------------------------------------------------
+    kite_manager = KiteAPIManager()
+
+    instruments = kite_manager.load_instruments()
+    if instruments is None:
+        logging.error("❌ Failed to load instruments.")
+        return
+
+    expiry = get_next_expiry(instruments)
+    if not expiry:
+        logging.error("❌ Could not determine expiry.")
+        return
+
+    # --------------------------------------------------------
+    # 4. INITIALIZE STRATEGIES (INDEPENDENT CE & PE)
+    # --------------------------------------------------------
+    ce_strategy = TradingStrategy(kite_manager, instruments, expiry, "CE")
+    pe_strategy = TradingStrategy(kite_manager, instruments, expiry, "PE")
+
+    # Restore state
+    load_state(ce_strategy, "CE")
+    load_state(pe_strategy, "PE")
+
+    # Force initial strike selection
+    ce_strategy.update_strike_if_needed(force=True)
+    pe_strategy.update_strike_if_needed(force=True)
+
+    # --------------------------------------------------------
+    # 5. MAIN LOOP
+    # --------------------------------------------------------
+    logging.info("✅ Engine running...")
 
     while True:
 
-        if not market_open():
-            time.sleep(10)
-            continue
+        now = datetime.now()
 
-        # -------------------------
-        # ENTRY LOGIC
-        # -------------------------
+        # Exit if market closed
+        if now.hour == 15 and now.minute >= 25:
+            logging.info("🛑 Market closing. Exiting positions.")
 
-        if not state["position"]["active"]:
+            if ce_strategy.position:
+                ce_strategy.exit_position("EOD")
+            if pe_strategy.position:
+                pe_strategy.exit_position("EOD")
 
-            signal = generate_signal()
-
-            if signal and signal["action"] == "BUY":
-
-                quantity = get_quantity()
-
-                logger.info(f"Placing order: {signal}")
-
-                order_id = place_market_order(
-                    kite,
-                    signal["symbol"],
-                    quantity,
-                    "BUY"
-                )
-
-                order_details = wait_for_completion(kite, order_id)
-
-                entry_price = order_details["average_price"]
-
-                state["position"] = {
-                    "active": True,
-                    "symbol": signal["symbol"],
-                    "expiry": signal["expiry"],
-                    "strike": signal["strike"],
-                    "type": signal["type"],
-                    "qty": quantity,
-                    "entry_price": entry_price,
-                    "order_id": order_id,
-                    "entry_time": datetime.datetime.now().isoformat()
-                }
-
-                save_state(state)
-
-                logger.info("Position opened successfully")
-
-        # -------------------------
-        # POSITION MONITORING
-        # -------------------------
-
-        if state["position"]["active"]:
-
-            # Fetch LTP
-            ltp = kite.ltp(state["position"]["symbol"])
-            current_price = list(ltp.values())[0]["last_price"]
-
-            entry_price = state["position"]["entry_price"]
-            sl_pct = get_stop_loss_pct()
-            sl_price = entry_price * (1 - sl_pct)
-
-            # HARD SL
-            if current_price <= sl_price:
-
-                logger.info("Hard SL triggered")
-
-                order_id = place_market_order(
-                    kite,
-                    state["position"]["symbol"],
-                    state["position"]["qty"],
-                    "SELL"
-                )
-
-                exit_details = wait_for_completion(kite, order_id)
-
-                exit_price = exit_details["average_price"]
-
-                pnl = (exit_price - entry_price) * state["position"]["qty"]
-
-                append_trade([
-                    datetime.datetime.now().strftime("%Y-%m-%d"),
-                    BOT_VERSION,
-                    state["position"]["expiry"],
-                    state["position"]["strike"],
-                    state["position"]["type"],
-                    state["position"]["entry_time"],
-                    datetime.datetime.now().isoformat(),
-                    entry_price,
-                    exit_price,
-                    state["position"]["qty"],
-                    pnl,
-                    "HARD_SL"
-                ])
-
-                state["position"]["active"] = False
-                save_state(state)
-
-                logger.info(f"Position closed. PnL: {pnl}")
-
-        # -------------------------
-        # EOD FORCED EXIT
-        # -------------------------
-
-        if is_eod() and state["position"]["active"]:
-
-            logger.info("EOD exit triggered")
-
-            order_id = place_market_order(
-                kite,
-                state["position"]["symbol"],
-                state["position"]["qty"],
-                "SELL"
-            )
-
-            exit_details = wait_for_completion(kite, order_id)
-
-            exit_price = exit_details["average_price"]
-
-            pnl = (exit_price - state["position"]["entry_price"]) * state["position"]["qty"]
-
-            append_trade([
-                datetime.datetime.now().strftime("%Y-%m-%d"),
-                BOT_VERSION,
-                state["position"]["expiry"],
-                state["position"]["strike"],
-                state["position"]["type"],
-                state["position"]["entry_time"],
-                datetime.datetime.now().isoformat(),
-                state["position"]["entry_price"],
-                exit_price,
-                state["position"]["qty"],
-                pnl,
-                "EOD"
-            ])
-
-            state["position"]["active"] = False
-            save_state(state)
-
-            summary = generate_eod_summary()
-            logger.info(summary)
-            print(summary)
+            save_state(ce_strategy, "CE")
+            save_state(pe_strategy, "PE")
 
             break
 
-        time.sleep(1)
+        # Update strikes dynamically
+        ce_strategy.update_strike_if_needed()
+        pe_strategy.update_strike_if_needed()
 
-except Exception as e:
-    logger.exception("Fatal error occurred")
-    sys.exit(1)
+        # Check CE Entry
+        if not ce_strategy.position:
+            if ce_strategy.check_entry_conditions():
+                ce_strategy.enter_position()
+
+        # Check PE Entry
+        if not pe_strategy.position:
+            if pe_strategy.check_entry_conditions():
+                pe_strategy.enter_position()
+
+        # Monitor CE
+        if ce_strategy.position:
+            ce_strategy.monitor_position()
+
+        # Monitor PE
+        if pe_strategy.position:
+            pe_strategy.monitor_position()
+
+        # Save state every loop
+        save_state(ce_strategy, "CE")
+        save_state(pe_strategy, "PE")
+
+        # Loop delay
+        threading.Event().wait(5)
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+    main()
